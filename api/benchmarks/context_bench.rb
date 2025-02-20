@@ -480,6 +480,106 @@ class ArrayContext
 end
 
 # Manages context on a per-fiber basis
+class DefensiveArrayContext
+  EMPTY_ENTRIES = {}.freeze
+  STACK_KEY = :__defensive_array_context_storage__
+  private_constant :EMPTY_ENTRIES, :STACK_KEY
+
+  DetachError = Class.new(StandardError)
+
+  class << self
+    def current
+      stack.last || ROOT
+    end
+
+    def attach(context)
+      s = stack
+      s.push(context)
+      s.size
+    end
+
+    def detach(token)
+      s = stack
+      calls_matched = (token == s.size)
+      OpenTelemetry.handle_error(exception: DetachError.new('calls to detach should match corresponding calls to attach.')) unless calls_matched
+
+      s.pop
+      calls_matched
+    end
+
+    def with_current(ctx)
+      token = attach(ctx)
+      yield ctx
+    ensure
+      detach(token)
+    end
+
+    def with_value(key, value)
+      ctx = current.set_value(key, value)
+      token = attach(ctx)
+      yield ctx, value
+    ensure
+      detach(token)
+    end
+
+    def with_values(values)
+      ctx = current.set_values(values)
+      token = attach(ctx)
+      yield ctx, values
+    ensure
+      detach(token)
+    end
+
+    def value(key)
+      current.value(key)
+    end
+
+    def clear
+      stack.clear
+    end
+
+    def empty
+      new(EMPTY_ENTRIES)
+    end
+
+    private
+
+    def stack
+      current_stack, owner = Thread.current[STACK_KEY]
+
+      if owner != Fiber.current
+        current_stack = []
+        Thread.current[STACK_KEY] = [current_stack, Fiber.current]
+      end
+
+      current_stack
+    end
+  end
+
+  def initialize(entries)
+    @entries = entries.freeze
+  end
+
+  def value(key)
+    @entries[key]
+  end
+
+  alias [] value
+
+  def set_value(key, value)
+    new_entries = @entries.dup
+    new_entries[key] = value
+    DefensiveArrayContext.new(new_entries)
+  end
+
+  def set_values(values) # rubocop:disable Naming/AccessorMethodName:
+    DefensiveArrayContext.new(@entries.merge(values))
+  end
+
+  ROOT = empty.freeze
+end
+
+# Manages context on a per-fiber basis
 class FiberLocalArrayContext
   EMPTY_ENTRIES = {}.freeze
   STACK_KEY = :__fiber_local_array_context_storage__
@@ -797,6 +897,10 @@ Benchmark.ipsa do |x|
     ArrayContext.with_value('key', 'value') { |ctx, _| ctx }
   end
 
+  x.report 'DefensiveArrayContext.with_value' do
+    DefensiveArrayContext.with_value('key', 'value') { |ctx, _| ctx }
+  end
+
   x.report 'ImmutableArrayContext.with_value' do
     ImmutableArrayContext.with_value('key', 'value') { |ctx, _| ctx }
   end
@@ -854,6 +958,28 @@ Benchmark.ipsa do |x| # rubocop:disable Metrics/BlockLength
                   ArrayContext.with_value('key', 'value') do
                     ArrayContext.with_value('key', 'value') do
                       ArrayContext.with_value('key', 'value') { |ctx, _| ctx }
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  x.report 'DefensiveArrayContext.with_value recursive' do
+    DefensiveArrayContext.with_value('key', 'value') do
+      DefensiveArrayContext.with_value('key', 'value') do
+        DefensiveArrayContext.with_value('key', 'value') do
+          DefensiveArrayContext.with_value('key', 'value') do
+            DefensiveArrayContext.with_value('key', 'value') do
+              DefensiveArrayContext.with_value('key', 'value') do
+                DefensiveArrayContext.with_value('key', 'value') do
+                  DefensiveArrayContext.with_value('key', 'value') do
+                    DefensiveArrayContext.with_value('key', 'value') do
+                      DefensiveArrayContext.with_value('key', 'value') { |ctx, _| ctx }
                     end
                   end
                 end
